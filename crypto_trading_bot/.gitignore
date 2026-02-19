@@ -1,0 +1,33 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.pyc
+__pycache__/
+
+# Logs
+logs/
+*.log
+
+# Models
+models/
+
+# Cache
+.pytest_cache/
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+
+# Data files (optional - add if too large)
+*.csv
+*.json
