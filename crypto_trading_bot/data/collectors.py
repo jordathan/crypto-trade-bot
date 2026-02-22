@@ -80,6 +80,10 @@ class CryptoDataCollector:
                 logger.warning(f"No data found for {symbol}")
                 return pd.DataFrame()
             
+            # Handle single ticker - rename MultiIndex columns to simple columns
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            
             # Add technical indicators
             data = self._add_technical_indicators(data)
             return data

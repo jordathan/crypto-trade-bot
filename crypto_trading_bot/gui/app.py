@@ -910,7 +910,7 @@ class TradingBotGUI:
                 'Win Rate': '{:.1%}',
                 'Sharpe': '{:.2f}',
                 'Final Value': '${:,.2f}'
-            }).applymap(color_return, subset=['Return (%)'])
+            }).map(color_return, subset=['Return (%)'])
             
             st.dataframe(styled_df, use_container_width=True, height=400)
             
