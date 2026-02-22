@@ -9,6 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 import sys
+import pandas as pd
+import numpy as np
+import time
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -19,6 +22,7 @@ from strategy.trading_engine import TradingLogic, SimulatedPortfolio
 from strategy.ml_optimizer import MLModelTrainer, StrategyOptimizer
 from strategy.logging import TradeLogger, PerformanceTracker
 from backtester.simulator import BacktestEngine
+from manager.ralph_manager import RalphManager
 
 
 # Configure logging
@@ -44,12 +48,23 @@ class TradingBot:
         
         # Initialize components
         self.collector = CryptoDataCollector(
-            lookback_days=self.config['data']['lookback_days']
+            lookback_days=self.config['data']['lookback_days'],
+            custom_tokens=self.config.get('data', {}).get('custom_tokens', [])
         )
         self.processor = MarketDataProcessor()
+        strategy_cfg = self.config.get('strategy', {})
         self.trading_logic = TradingLogic(
             target_return=self.config['trading']['target_daily_return'],
-            max_loss=self.config['trading']['max_loss_per_trade']
+            max_loss=self.config['trading']['max_loss_per_trade'],
+            min_confidence=strategy_cfg.get('min_confidence', 0.55),
+            rsi_low=strategy_cfg.get('rsi_low', 30.0),
+            rsi_high=strategy_cfg.get('rsi_high', 70.0),
+            momentum_window=strategy_cfg.get('momentum_window', 20),
+            momentum_up=strategy_cfg.get('momentum_up', 0.05),
+            momentum_down=strategy_cfg.get('momentum_down', -0.05),
+            signal_buy_threshold=strategy_cfg.get('signal_buy_threshold', 0.3),
+            signal_strong_threshold=strategy_cfg.get('signal_strong_threshold', 0.5),
+            weights=strategy_cfg.get('weights')
         )
         self.portfolio = SimulatedPortfolio(
             initial_capital=self.config['trading']['initial_capital']
@@ -70,7 +85,9 @@ class TradingBot:
         
         # Initialize logging
         self.trade_logger = TradeLogger()
-        self.perf_tracker = PerformanceTracker()
+        self.perf_tracker = PerformanceTracker(
+            session_timestamp=self.trade_logger.session_timestamp
+        )
         
         # Trading history
         self.daily_trades: List[Dict] = []
@@ -178,21 +195,45 @@ class TradingBot:
         )
         
         # Log signal
+        latest_data = data.iloc[-1]
+        try:
+            # Safely extract values handling both scalar and Series
+            def safe_get(series_or_scalar):
+                if pd.api.types.is_scalar(series_or_scalar):
+                    return float(series_or_scalar) if not pd.isna(series_or_scalar) else 0.0
+                else:
+                    val = series_or_scalar.iloc[0] if len(series_or_scalar) > 0 else 0.0
+                    return float(val) if not pd.isna(val) else 0.0
+            
+            ema12 = safe_get(latest_data['EMA_12']) if 'EMA_12' in latest_data.index else 0
+            ema26 = safe_get(latest_data['EMA_26']) if 'EMA_26' in latest_data.index else 0
+            ema_cross = 1 if ema12 > ema26 else -1
+            
+            close_price = safe_get(latest_data['Close'])
+            rsi_val = safe_get(latest_data.get('RSI', 0))
+            macd_val = safe_get(latest_data.get('MACD', 0))
+        except (ValueError, TypeError, KeyError) as e:
+            ema_cross = 0
+            close_price = 0.0
+            rsi_val = 0.0
+            macd_val = 0.0
+            
         self.trade_logger.log_signal(
             symbol=symbol,
             signal=signal.name,
             confidence=confidence,
-            price=data.iloc[-1]['Close'],
+            price=close_price,
             indicators={
-                'RSI': data.iloc[-1].get('RSI', 0),
-                'MACD': data.iloc[-1].get('MACD', 0),
-                'EMA_Cross': 1 if data.iloc[-1]['EMA_12'] > data.iloc[-1]['EMA_26'] else -1
+                'RSI': rsi_val,
+                'MACD': macd_val,
+                'EMA_Cross': ema_cross
             },
             sentiment_data=sentiment_data.get(symbol)
         )
         
         # Execute trades based on signal
-        current_price = data.iloc[-1]['Close']
+        current_val = data.iloc[-1]['Close']
+        current_price = float(current_val) if pd.api.types.is_scalar(current_val) else float(current_val.iloc[0])
         latest_row = data.iloc[-1]
         
         # Calculate volatility
@@ -418,7 +459,8 @@ class TradingBot:
         
         # Run backtest
         engine = BacktestEngine(
-            initial_capital=self.config['trading']['initial_capital']
+            initial_capital=self.config['trading']['initial_capital'],
+            min_confidence=self.trading_logic.min_confidence
         )
         
         def signal_gen(data, sentiment, ml_prob):
@@ -439,6 +481,82 @@ class TradingBot:
             logger.info(f"  Max Drawdown: {results.get('max_drawdown_pct', 0):.2f}%")
         
         return results
+    
+    def run_continuous(self, interval_minutes: int = 60):
+        """
+        Run trading cycles continuously with specified interval.
+        
+        Args:
+            interval_minutes: Minutes between cycles (default: 60)
+        """
+        logger.info(f"Starting continuous trading mode (interval: {interval_minutes} min)")
+        logger.info("Press Ctrl+C to stop")
+        
+        cycle_count = 0
+        try:
+            while True:
+                cycle_count += 1
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Cycle #{cycle_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"{'='*60}")
+                
+                result = self.run_daily_cycle()
+                
+                logger.info(f"Cycle #{cycle_count} completed")
+                logger.info(f"Next cycle in {interval_minutes} minutes...")
+                logger.info(f"{'='*60}\n")
+                
+                # Wait for the interval
+                time.sleep(interval_minutes * 60)
+                
+        except KeyboardInterrupt:
+            logger.info(f"\n\nContinuous mode stopped by user after {cycle_count} cycles")
+            logger.info("Final Statistics:")
+            logger.info(f"  Total Cycles: {cycle_count}")
+            logger.info(f"  Portfolio Value: ${self.portfolio.get_portfolio_value({}):.2f}")
+    
+    def run_continuous_backtest(self, interval_minutes: int = 5, days: int = 90):
+        """
+        Run backtests continuously on different cryptocurrencies.
+        
+        Args:
+            interval_minutes: Minutes between backtests (default: 5)
+            days: Number of days to backtest (default: 90)
+        """
+        logger.info(f"Starting continuous backtest mode")
+        logger.info(f"Interval: {interval_minutes} min | Lookback: {days} days")
+        logger.info("Press Ctrl+C to stop\n")
+        
+        test_count = 0
+        symbols_to_test = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'SOL-USD', 'ADA-USD', 
+                          'XRP-USD', 'DOGE-USD', 'LINK-USD', 'AVAX-USD', 'MATIC-USD']
+        
+        try:
+            while True:
+                symbol = symbols_to_test[test_count % len(symbols_to_test)]
+                test_count += 1
+                
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Backtest #{test_count} - {symbol}")
+                logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"{'='*60}")
+                
+                results = self.run_backtest(symbol, days)
+                
+                if results:
+                    logger.info(f"\nCompleted backtest #{test_count}: {symbol}")
+                    logger.info(f"Next backtest in {interval_minutes} minutes...")
+                else:
+                    logger.warning(f"Backtest failed for {symbol}, skipping to next")
+                
+                logger.info(f"{'='*60}\n")
+                
+                # Wait for the interval
+                time.sleep(interval_minutes * 60)
+                
+        except KeyboardInterrupt:
+            logger.info(f"\n\nContinuous backtest stopped by user after {test_count} tests")
+            logger.info(f"Total backtests completed: {test_count}")
 
 
 def main():
@@ -446,10 +564,15 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Crypto Trading Bot')
-    parser.add_argument('--mode', choices=['run', 'schedule', 'backtest'], 
-                       default='run', help='Running mode')
+    parser.add_argument('--mode', 
+                       choices=['run', 'schedule', 'backtest', 'continuous', 'continuous-backtest', 'ralph', 'ralph-auto', 'ralph-telegram'], 
+                       default='run', 
+                       help='Running mode: run (single cycle), schedule (daily), backtest (single), continuous (loop trading), continuous-backtest (loop backtesting)')
     parser.add_argument('--symbol', default='BTC-USD', help='Symbol for backtest')
     parser.add_argument('--days', type=int, default=90, help='Backtest days')
+    parser.add_argument('--interval', type=int, default=60, help='Minutes between cycles in continuous modes')
+    parser.add_argument('--ralph-days', type=int, default=90, help='Days for Ralph backtests')
+    parser.add_argument('--ralph-max-trials', type=int, default=50, help='Max parameter trials per Ralph sweep')
     parser.add_argument('--config', default='config.json', help='Config file path')
     
     args = parser.parse_args()
@@ -469,6 +592,30 @@ def main():
     elif args.mode == 'backtest':
         logger.info(f"Running backtest for {args.symbol}")
         bot.run_backtest(args.symbol, args.days)
+    
+    elif args.mode == 'continuous':
+        logger.info(f"Starting continuous trading mode")
+        bot.run_continuous(interval_minutes=args.interval)
+    
+    elif args.mode == 'continuous-backtest':
+        logger.info(f"Starting continuous backtesting mode")
+        bot.run_continuous_backtest(interval_minutes=args.interval, days=args.days)
+
+    elif args.mode == 'ralph':
+        manager = RalphManager(config_path=args.config)
+        manager.run_tui()
+
+    elif args.mode == 'ralph-auto':
+        manager = RalphManager(config_path=args.config)
+        manager.run_continuous_optimization(
+            interval_minutes=args.interval,
+            days=args.ralph_days,
+            max_trials=args.ralph_max_trials
+        )
+
+    elif args.mode == 'ralph-telegram':
+        from manager.ralph_telegram_bot import main as ralph_telegram_main
+        ralph_telegram_main()
 
 
 if __name__ == "__main__":

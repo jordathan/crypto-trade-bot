@@ -30,16 +30,24 @@ TOP_100_CRYPTOS = [
 class CryptoDataCollector:
     """Collects historical crypto price data from yfinance."""
     
-    def __init__(self, lookback_days: int = 90):
+    def __init__(self, lookback_days: int = 90, custom_tokens: List[Dict[str, str]] = None):
         """
         Initialize the data collector.
         
         Args:
             lookback_days: Number of historical days to fetch
+            custom_tokens: Optional list of custom tokens with chain/contract
         """
         self.lookback_days = lookback_days
         self.end_date = datetime.now()
         self.start_date = self.end_date - timedelta(days=lookback_days)
+        self.custom_tokens = custom_tokens or []
+        self._custom_token_map = self._build_custom_token_map(self.custom_tokens)
+
+    def update_custom_tokens(self, custom_tokens: List[Dict[str, str]]) -> None:
+        """Update the custom token map at runtime."""
+        self.custom_tokens = custom_tokens or []
+        self._custom_token_map = self._build_custom_token_map(self.custom_tokens)
     
     def fetch_crypto_data(self, symbol: str) -> pd.DataFrame:
         """
@@ -52,6 +60,14 @@ class CryptoDataCollector:
             DataFrame with OHLCV data
         """
         try:
+            if symbol in self._custom_token_map:
+                token = self._custom_token_map[symbol]
+                return self._fetch_contract_data(
+                    chain=token["chain"],
+                    contract=token["contract"],
+                    symbol=symbol
+                )
+
             logger.info(f"Fetching data for {symbol}")
             data = yf.download(
                 symbol,
@@ -89,7 +105,84 @@ class CryptoDataCollector:
     
     def get_top_100_cryptos(self) -> List[str]:
         """Get list of top 100 cryptocurrencies."""
-        return TOP_100_CRYPTOS.copy()
+        symbols = TOP_100_CRYPTOS.copy()
+        for symbol in self._custom_token_map.keys():
+            if symbol not in symbols:
+                symbols.append(symbol)
+        return symbols
+
+    def _build_custom_token_map(self, tokens: List[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+        token_map: Dict[str, Dict[str, str]] = {}
+        for token in tokens:
+            symbol = token.get("symbol")
+            chain = token.get("chain")
+            contract = token.get("contract")
+            if symbol and chain and contract:
+                token_map[symbol] = {
+                    "symbol": symbol,
+                    "chain": chain,
+                    "contract": contract
+                }
+        return token_map
+
+    def _fetch_contract_data(self, chain: str, contract: str, symbol: str) -> pd.DataFrame:
+        """Fetch historical OHLCV data for a contract address via CoinGecko."""
+        logger.info(f"Fetching CoinGecko data for {symbol} ({chain}:{contract})")
+
+        url = f"https://api.coingecko.com/api/v3/coins/{chain}/contract/{contract}/market_chart"
+        params = {
+            "vs_currency": "usd",
+            "days": self.lookback_days
+        }
+
+        try:
+            response = requests.get(url, params=params, timeout=20)
+            if response.status_code != 200:
+                logger.warning(f"CoinGecko error for {symbol}: {response.status_code}")
+                return pd.DataFrame()
+
+            payload = response.json()
+            prices = payload.get("prices", [])
+            volumes = payload.get("total_volumes", [])
+
+            if not prices:
+                logger.warning(f"No CoinGecko data for {symbol}")
+                return pd.DataFrame()
+
+            data = self._market_chart_to_ohlcv(prices, volumes)
+            if data.empty:
+                return pd.DataFrame()
+
+            data = self._add_technical_indicators(data)
+            return data
+        except Exception as e:
+            logger.error(f"Error fetching CoinGecko data for {symbol}: {e}")
+            return pd.DataFrame()
+
+    @staticmethod
+    def _market_chart_to_ohlcv(prices: List[List[float]], volumes: List[List[float]]) -> pd.DataFrame:
+        price_df = pd.DataFrame(prices, columns=["timestamp", "price"])
+        price_df["date"] = pd.to_datetime(price_df["timestamp"], unit="ms")
+        price_df = price_df.set_index("date")
+
+        ohlc = price_df["price"].resample("1D").ohlc()
+        ohlc = ohlc.rename(columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close"
+        })
+
+        if volumes:
+            vol_df = pd.DataFrame(volumes, columns=["timestamp", "volume"])
+            vol_df["date"] = pd.to_datetime(vol_df["timestamp"], unit="ms")
+            vol_df = vol_df.set_index("date")
+            ohlc["Volume"] = vol_df["volume"].resample("1D").sum()
+        else:
+            ohlc["Volume"] = 0.0
+
+        ohlc = ohlc.dropna(subset=["Close"])
+        return ohlc
     
     def get_current_price(self, symbol: str) -> float:
         """

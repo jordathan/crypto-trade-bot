@@ -29,8 +29,9 @@ class TradeLogger:
         self.logger = logging.getLogger('TradeBot')
         self.logger.setLevel(logging.DEBUG)
         
-        # File handler
-        log_file = self.log_dir / f'bot_{datetime.now().strftime("%Y%m%d")}.log'
+        # File handler with timestamp
+        self.session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = self.log_dir / f'bot_{self.session_timestamp}.log'
         fh = logging.FileHandler(log_file)
         fh.setLevel(logging.DEBUG)
         
@@ -42,8 +43,8 @@ class TradeLogger:
         
         self.logger.addHandler(fh)
         
-        # Trades file
-        self.trades_file = self.log_dir / f'trades_{datetime.now().strftime("%Y%m%d")}.json'
+        # Trades file with timestamp
+        self.trades_file = self.log_dir / f'trades_{self.session_timestamp}.json'
         self.trades_data: List[Dict] = []
         
         # Load existing trades if any
@@ -158,11 +159,39 @@ class TradeLogger:
         """Get all logged trades."""
         return self.trades_data.copy()
 
+    def write_daily_summary(self, summary: Dict[str, Any]) -> Dict[str, Path]:
+        """Write short daily summary to text + JSON."""
+        summary_name = f"daily_summary_{self.session_timestamp}"
+        text_path = self.log_dir / f"{summary_name}.txt"
+        json_path = self.log_dir / f"{summary_name}.json"
+
+        lines = [
+            f"Date: {summary.get('date', '')}",
+            f"Cycle: {summary.get('cycle', '')}",
+            f"Status: {summary.get('status', '')}",
+            f"Trades: {summary.get('trades_count', 0)}",
+            f"Return: {summary.get('return_pct', 0):+.2f}%",
+            f"Win Rate: {summary.get('win_rate', 0):.1%}",
+            f"Max Drawdown: {summary.get('max_drawdown_pct', 0):.2f}%",
+            f"Errors: {summary.get('errors_count', 0)}",
+            f"Notes: {summary.get('notes', '')}".strip()
+        ]
+
+        try:
+            with open(text_path, 'w') as f:
+                f.write("\n".join(lines))
+            with open(json_path, 'w') as f:
+                json.dump(summary, f, indent=2, default=str)
+        except Exception as e:
+            self.logger.error(f"Error writing daily summary: {e}")
+
+        return {'text': text_path, 'json': json_path}
+
 
 class PerformanceTracker:
     """Tracks portfolio performance metrics."""
     
-    def __init__(self, log_dir: str = 'logs'):
+    def __init__(self, log_dir: str = 'logs', session_timestamp: str = None):
         """
         Initialize performance tracker.
         
@@ -171,7 +200,8 @@ class PerformanceTracker:
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
-        self.perf_file = self.log_dir / f'performance_{datetime.now().strftime("%Y%m%d")}.csv'
+        timestamp = session_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.perf_file = self.log_dir / f'performance_{timestamp}.csv'
         self.performance_data: List[Dict] = []
         
         # Load existing performance data if any

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class BacktestEngine:
     """Run backtest simulations on historical data."""
     
-    def __init__(self, initial_capital: float = 1000.0):
+    def __init__(self, initial_capital: float = 1000.0, min_confidence: float = 0.55):
         """
         Initialize backtest engine.
         
@@ -23,6 +23,7 @@ class BacktestEngine:
             initial_capital: Starting capital
         """
         self.initial_capital = initial_capital
+        self.min_confidence = min_confidence
         self.capital = initial_capital
         self.cash = initial_capital
         self.positions: Dict[str, Dict] = {}
@@ -126,7 +127,7 @@ class BacktestEngine:
         position_size = self._calculate_position_size(confidence)
         
         # BUY signal
-        if signal.value > 1 and confidence > 0.55:
+        if signal.value > 1 and confidence > self.min_confidence:
             if self.cash >= position_size:
                 qty = position_size / price
                 self.cash -= position_size
@@ -147,7 +148,7 @@ class BacktestEngine:
                 })
         
         # SELL signal
-        elif signal.value < -1 and confidence > 0.55:
+        elif signal.value < -1 and confidence > self.min_confidence:
             if symbol in self.positions:
                 position = self.positions[symbol]
                 proceeds = position['qty'] * price

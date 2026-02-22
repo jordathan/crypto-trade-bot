@@ -41,7 +41,45 @@ python main.py --mode backtest --symbol BTC-USD --days 90
 ```
 Tests strategy on historical data
 
-#### **Option E: Test Installation**
+#### **Option E: Continuous Trading Mode (NEW!)**
+```bash
+python main.py --mode continuous --interval 60
+```
+Runs trading cycles continuously every 60 minutes. Great for local testing!
+Press Ctrl+C to stop.
+
+#### **Option F: Continuous Backtesting (NEW!)**
+```bash
+python main.py --mode continuous-backtest --interval 5 --days 90
+```
+Continuously backtests different cryptocurrencies with 5-minute intervals.
+Perfect for learning from multiple scenarios! Press Ctrl+C to stop.
+
+#### **Option G: Ralph Manager (NEW!)**
+```bash
+python main.py --mode ralph
+```
+Opens a terminal-style manager to run sweeps, optimize, and plan the next cycle.
+
+#### **Option H: Ralph Auto (NEW!)**
+```bash
+python main.py --mode ralph-auto --interval 60 --ralph-days 90 --ralph-max-trials 50
+```
+Runs continuous optimize cycles automatically. Press Ctrl+C to stop.
+
+#### **Option I: Ralph Telegram Bot (NEW!)**
+```bash
+python main.py --mode ralph-telegram
+```
+Lets you control Ralph via Telegram messages.
+
+**Auto-push updated numbers:**
+```
+/watch YOUR_SECRET 30
+```
+Ralph will push the latest summary whenever a new cycle completes.
+
+#### **Option J: Test Installation**
 ```bash
 python test_installation.py
 ```
@@ -60,10 +98,25 @@ Edit `config.json`:
 "max_loss_per_trade": 0.01     // Risk tolerance
 ```
 
-### View Trade History
+### View Trade History & Logs
+**Log Files (with timestamps):**
+- `logs/bot_YYYYMMDD_HHMMSS.log` - Detailed operations log
+- `logs/trades_YYYYMMDD_HHMMSS.json` - All signals, decisions, and trades
+- `logs/performance_YYYYMMDD_HHMMSS.csv` - Portfolio metrics over time
+- `logs/daily_summary_YYYYMMDD_HHMMSS.txt` - Short daily summary
+- `logs/daily_summary_YYYYMMDD_HHMMSS.json` - Summary data for analysis
+
+**In GUI:**
 1. Open GUI dashboard
 2. Click "📋 Trade Logs" tab
 3. Filter and download as CSV
+
+**How the Bot Learns:**
+The ML model reads old log files to:
+- Analyze which indicators predicted successful trades
+- Extract patterns from RSI, MACD, EMA values
+- Train on past successes/failures
+- Improve future predictions (retrains every 50 trades)
 
 ### Check Performance Metrics
 1. Open GUI dashboard

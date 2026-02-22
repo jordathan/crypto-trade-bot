@@ -75,11 +75,17 @@ class MLModelTrainer:
                 for col in feature_cols:
                     if col in price_data.columns:
                         val = price_data.iloc[i][col]
-                        features.append(0.0 if pd.isna(val) else val)
+                        # Handle both scalar and Series
+                        if pd.api.types.is_scalar(val):
+                            features.append(0.0 if pd.isna(val) else float(val))
+                        else:
+                            features.append(0.0 if pd.isna(val.iloc[0]) else float(val.iloc[0]))
                 
                 # Determine label based on next day's return
-                current_price = price_data.iloc[i]['Close']
-                next_price = price_data.iloc[i + 1]['Close']
+                current_val = price_data.iloc[i]['Close']
+                current_price = float(current_val) if pd.api.types.is_scalar(current_val) else float(current_val.iloc[0])
+                next_val = price_data.iloc[i + 1]['Close']
+                next_price = float(next_val) if pd.api.types.is_scalar(next_val) else float(next_val.iloc[0])
                 future_return = (next_price - current_price) / current_price
                 
                 # Label: 1 for up, 0 for down, -1 for unclear

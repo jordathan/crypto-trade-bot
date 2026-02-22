@@ -30,7 +30,15 @@ class TradingLogic:
         self,
         target_return: float = 0.02,
         max_loss: float = 0.01,
-        min_confidence: float = 0.55
+        min_confidence: float = 0.55,
+        rsi_low: float = 30.0,
+        rsi_high: float = 70.0,
+        momentum_window: int = 20,
+        momentum_up: float = 0.05,
+        momentum_down: float = -0.05,
+        signal_buy_threshold: float = 0.3,
+        signal_strong_threshold: float = 0.5,
+        weights: Optional[Dict[str, float]] = None
     ):
         """
         Initialize trading logic.
@@ -43,6 +51,22 @@ class TradingLogic:
         self.target_return = target_return
         self.max_loss = max_loss
         self.min_confidence = min_confidence
+        self.rsi_low = rsi_low
+        self.rsi_high = rsi_high
+        self.momentum_window = momentum_window
+        self.momentum_up = momentum_up
+        self.momentum_down = momentum_down
+        self.signal_buy_threshold = signal_buy_threshold
+        self.signal_strong_threshold = signal_strong_threshold
+
+        # Normalize weights
+        default_weights = {'technical': 0.5, 'sentiment': 0.3, 'ml': 0.2}
+        weights = weights or default_weights
+        weight_sum = sum(weights.values())
+        if weight_sum <= 0:
+            weights = default_weights
+            weight_sum = sum(weights.values())
+        self.weights = {k: v / weight_sum for k, v in weights.items()}
     
     def generate_signal(
         self,
@@ -94,8 +118,8 @@ class TradingLogic:
             # 1. EMA Crossover
             try:
                 if 'EMA_12' in data.columns and 'EMA_26' in data.columns:
-                    ema12_val = latest['EMA_12']
-                    ema26_val = latest['EMA_26']
+                    ema12_val = float(latest['EMA_12']) if pd.api.types.is_scalar(latest['EMA_12']) else float(latest['EMA_12'].iloc[0])
+                    ema26_val = float(latest['EMA_26']) if pd.api.types.is_scalar(latest['EMA_26']) else float(latest['EMA_26'].iloc[0])
                     if not np.isnan(ema12_val) and not np.isnan(ema26_val):
                         if ema12_val > ema26_val:
                             signal_score += 0.2
@@ -107,12 +131,12 @@ class TradingLogic:
             # 2. RSI Signal
             try:
                 if 'RSI' in data.columns:
-                    rsi_val = latest['RSI']
+                    rsi_val = float(latest['RSI']) if pd.api.types.is_scalar(latest['RSI']) else float(latest['RSI'].iloc[0])
                     if not np.isnan(rsi_val):
-                        if rsi_val < 30:
+                        if rsi_val < self.rsi_low:
                             signal_score += 0.15
                             confidence += 0.1
-                        elif rsi_val > 70:
+                        elif rsi_val > self.rsi_high:
                             signal_score -= 0.15
                             confidence += 0.1
             except (ValueError, TypeError, KeyError):
@@ -121,8 +145,8 @@ class TradingLogic:
             # 3. MACD Signal
             try:
                 if 'MACD' in data.columns and 'MACD_Signal' in data.columns:
-                    macd_val = latest['MACD']
-                    macd_sig = latest['MACD_Signal']
+                    macd_val = float(latest['MACD']) if pd.api.types.is_scalar(latest['MACD']) else float(latest['MACD'].iloc[0])
+                    macd_sig = float(latest['MACD_Signal']) if pd.api.types.is_scalar(latest['MACD_Signal']) else float(latest['MACD_Signal'].iloc[0])
                     if not np.isnan(macd_val) and not np.isnan(macd_sig):
                         if macd_val > macd_sig:
                             signal_score += 0.15
@@ -134,9 +158,9 @@ class TradingLogic:
             # 4. Bollinger Bands
             try:
                 if 'BB_Lower' in data.columns and 'BB_Upper' in data.columns and 'Close' in data.columns:
-                    bb_lower = latest['BB_Lower']
-                    bb_upper = latest['BB_Upper']
-                    price = latest['Close']
+                    bb_lower = float(latest['BB_Lower']) if pd.api.types.is_scalar(latest['BB_Lower']) else float(latest['BB_Lower'].iloc[0])
+                    bb_upper = float(latest['BB_Upper']) if pd.api.types.is_scalar(latest['BB_Upper']) else float(latest['BB_Upper'].iloc[0])
+                    price = float(latest['Close']) if pd.api.types.is_scalar(latest['Close']) else float(latest['Close'].iloc[0])
                     if not np.isnan(bb_lower) and not np.isnan(bb_upper) and not np.isnan(price):
                         if price < bb_lower:
                             signal_score += 0.15
@@ -150,9 +174,9 @@ class TradingLogic:
             # 5. Moving Average Trend
             try:
                 if 'SMA_10' in data.columns and 'SMA_20' in data.columns and 'SMA_50' in data.columns:
-                    sma10 = latest['SMA_10']
-                    sma20 = latest['SMA_20']
-                    sma50 = latest['SMA_50']
+                    sma10 = float(latest['SMA_10']) if pd.api.types.is_scalar(latest['SMA_10']) else float(latest['SMA_10'].iloc[0])
+                    sma20 = float(latest['SMA_20']) if pd.api.types.is_scalar(latest['SMA_20']) else float(latest['SMA_20'].iloc[0])
+                    sma50 = float(latest['SMA_50']) if pd.api.types.is_scalar(latest['SMA_50']) else float(latest['SMA_50'].iloc[0])
                     if not np.isnan(sma10) and not np.isnan(sma20) and not np.isnan(sma50):
                         if sma10 > sma20 and sma20 > sma50:
                             signal_score += 0.1
@@ -163,14 +187,15 @@ class TradingLogic:
             
             # 6. Momentum
             try:
-                if len(data) >= 20 and 'Close' in data.columns:
-                    recent_close = latest['Close']
-                    past_close = data.iloc[-20]['Close']
+                if len(data) >= self.momentum_window and 'Close' in data.columns:
+                    recent_close = float(latest['Close']) if pd.api.types.is_scalar(latest['Close']) else float(latest['Close'].iloc[0])
+                    past_val = data.iloc[-self.momentum_window]['Close']
+                    past_close = float(past_val) if pd.api.types.is_scalar(past_val) else float(past_val.iloc[0])
                     if not np.isnan(recent_close) and not np.isnan(past_close) and past_close != 0:
                         recent_return = (recent_close - past_close) / past_close
-                        if recent_return > 0.05:
+                        if recent_return > self.momentum_up:
                             signal_score += 0.1
-                        elif recent_return < -0.05:
+                        elif recent_return < self.momentum_down:
                             signal_score -= 0.1
             except (ValueError, TypeError, KeyError):
                 pass
@@ -193,30 +218,23 @@ class TradingLogic:
         Returns:
             Tuple of (TradeSignal, confidence)
         """
-        # Weighted combination
-        weights = {
-            'technical': 0.5,
-            'sentiment': 0.3,
-            'ml': 0.2
-        }
-        
         # Normalize ML prediction to -1 to 1
         ml_signal = (ml_prediction - 0.5) * 2
         
         combined = (
-            tech_signal * weights['technical'] +
-            sentiment * weights['sentiment'] +
-            ml_signal * weights['ml']
+            tech_signal * self.weights['technical'] +
+            sentiment * self.weights['sentiment'] +
+            ml_signal * self.weights['ml']
         )
         
         # Calculate confidence
         confidence = (tech_conf + abs(sentiment) + (ml_prediction if ml_prediction > 0.5 else 1 - ml_prediction)) / 3
         
         # Convert to signal
-        if combined > 0.3 and confidence > self.min_confidence:
-            signal = TradeSignal.STRONG_BUY if combined > 0.5 else TradeSignal.BUY
-        elif combined < -0.3 and confidence > self.min_confidence:
-            signal = TradeSignal.STRONG_SELL if combined < -0.5 else TradeSignal.SELL
+        if combined > self.signal_buy_threshold and confidence > self.min_confidence:
+            signal = TradeSignal.STRONG_BUY if combined > self.signal_strong_threshold else TradeSignal.BUY
+        elif combined < -self.signal_buy_threshold and confidence > self.min_confidence:
+            signal = TradeSignal.STRONG_SELL if combined < -self.signal_strong_threshold else TradeSignal.SELL
         else:
             signal = TradeSignal.HOLD
         

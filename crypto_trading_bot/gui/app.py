@@ -54,13 +54,79 @@ class TradingBotGUI:
     
     def __init__(self):
         """Initialize GUI."""
-        self.collector = CryptoDataCollector(lookback_days=90)
+        self.config_path = Path(__file__).parent.parent / "config.json"
+        self.config = self._load_config()
+        custom_tokens = self.config.get("data", {}).get("custom_tokens", [])
+        self.collector = CryptoDataCollector(lookback_days=90, custom_tokens=custom_tokens)
         self.processor = MarketDataProcessor()
         self.trading_logic = TradingLogic()
         self.portfolio = SimulatedPortfolio(initial_capital=1000.0)
         self.ml_trainer = MLModelTrainer()
         self.trade_logger = TradeLogger()
         self.perf_tracker = PerformanceTracker()
+
+    def _load_config(self) -> dict:
+        try:
+            with open(self.config_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_config(self, config: dict) -> None:
+        with open(self.config_path, "w") as f:
+            json.dump(config, f, indent=2)
+
+    def _safe_float(self, value, default: float = 0.0) -> float:
+        """Safely convert any value to float, handling Series and scalars."""
+        try:
+            if pd.api.types.is_scalar(value):
+                return float(value)
+            elif hasattr(value, 'iloc'):  # Series or DataFrame
+                return float(value.iloc[0])
+            elif hasattr(value, 'item'):  # numpy scalar
+                return float(value.item())
+            else:
+                return float(value)
+        except (TypeError, ValueError, AttributeError, IndexError):
+            return default
+    
+    def _add_custom_token(self, symbol: str, chain: str, contract: str) -> str:
+        # Reload config from file to get latest state
+        self.config = self._load_config()
+        
+        symbol = symbol.strip().upper()
+        contract = contract.strip().lower()
+        chain = chain.strip().lower()
+
+        if not symbol or not contract:
+            return "Symbol and contract address are required."
+
+        if not symbol.endswith("-USD"):
+            symbol = f"{symbol}-USD"
+
+        data_cfg = self.config.setdefault("data", {})
+        custom_tokens = data_cfg.setdefault("custom_tokens", [])
+
+        # Check for duplicates (case-insensitive for contract and chain)
+        for token in custom_tokens:
+            token_symbol = token.get("symbol", "").upper()
+            token_contract = token.get("contract", "").lower()
+            token_chain = token.get("chain", "").lower()
+            
+            if token_symbol == symbol:
+                return f"Symbol {symbol} already exists."
+            if token_contract == contract and token_chain == chain:
+                return "That contract address already exists on that chain."
+
+        custom_tokens.append({
+            "symbol": symbol,
+            "chain": chain,
+            "contract": contract
+        })
+
+        self._save_config(self.config)
+        self.collector.update_custom_tokens(custom_tokens)
+        return ""
     
     def run(self):
         """Run the GUI."""
@@ -93,6 +159,61 @@ class TradingBotGUI:
                 )
             
             st.session_state.selected_crypto = selected_crypto
+
+            # Custom token entry
+            st.subheader("Add Custom Token")
+            with st.expander("Add token by contract address"):
+                token_symbol = st.text_input("Symbol (e.g., MYTOKEN-USD)", key="custom_symbol")
+                chain = st.selectbox(
+                    "Chain",
+                    [
+                        "ethereum",
+                        "binance-smart-chain",
+                        "polygon-pos",
+                        "arbitrum-one",
+                        "optimism",
+                        "base",
+                        "avalanche",
+                        "fantom",
+                        "solana"
+                    ],
+                    index=0,
+                    key="custom_chain"
+                )
+                contract = st.text_input("Contract address", key="custom_contract")
+                st.caption("Uses CoinGecko for contract address price history.")
+
+                if st.button("Add custom token"):
+                    error = self._add_custom_token(token_symbol, chain, contract)
+                    if error:
+                        st.error(error)
+                    else:
+                        st.success("Custom token added. Refreshing list...")
+                        st.rerun()
+            
+            # Manage existing custom tokens
+            data_cfg = self.config.get("data", {})
+            custom_tokens = data_cfg.get("custom_tokens", [])
+            if custom_tokens:
+                st.subheader("Manage Custom Tokens")
+                with st.expander(f"View/Remove Custom Tokens ({len(custom_tokens)})"):
+                    for idx, token in enumerate(custom_tokens):
+                        col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
+                        with col1:
+                            st.write(f"**{token.get('symbol')}**")
+                        with col2:
+                            st.write(f"Chain: {token.get('chain')}")
+                        with col3:
+                            contract_addr = token.get('contract', '')
+                            short_addr = contract_addr[:8] + "..." if len(contract_addr) > 11 else contract_addr
+                            st.write(f"Address: `{short_addr}`")
+                        with col4:
+                            if st.button("🗑️ Remove", key=f"remove_{idx}"):
+                                self.config["data"]["custom_tokens"].pop(idx)
+                                self._save_config(self.config)
+                                self.collector.update_custom_tokens(self.config["data"]["custom_tokens"])
+                                st.success("Token removed!")
+                                st.rerun()
             
             # Settings
             st.subheader("Trading Settings")
@@ -134,12 +255,13 @@ class TradingBotGUI:
             self.collector.lookback_days = lookback_days
         
         # Main tabs
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "📊 Chart & Analysis",
             "🤖 Trading Signals",
             "📈 Performance",
             "📋 Trade Logs",
-            "⚡ Backtest"
+            "⚡ Backtest",
+            "🎯 Ralph Multi-Crypto"
         ])
         
         # Tab 1: Charts and Analysis
@@ -161,6 +283,10 @@ class TradingBotGUI:
         # Tab 5: Backtest
         with tab5:
             self._render_backtest_tab()
+        
+        # Tab 6: Ralph Multi-Crypto
+        with tab6:
+            self._render_ralph_tab()
         
         # Footer
         st.divider()
@@ -193,20 +319,23 @@ class TradingBotGUI:
             col1, col2, col3, col4 = st.columns(4)
             
             latest = data.iloc[-1]
-            curr_price = float(latest['Close'])
-            prev_close = float(data.iloc[-2]['Close']) if len(data) > 1 else curr_price
-            change_pct = ((curr_price - prev_close) / prev_close) * 100
+            curr_price = self._safe_float(latest['Close'])
+            prev_close_val = data.iloc[-2]['Close'] if len(data) > 1 else curr_price
+            prev_close = self._safe_float(prev_close_val)
+            change_pct = ((curr_price - prev_close) / prev_close) * 100 if prev_close != 0 else 0
             
             with col1:
                 st.metric("Current Price", f"${curr_price:.2f}", f"{change_pct:+.2f}%")
             with col2:
-                high_24 = float(data.iloc[-24:]['High'].max())
+                high_24 = data.iloc[-24:]['High'].max()
+                high_24 = self._safe_float(high_24)
                 st.metric("24h High", f"${high_24:.2f}")
             with col3:
-                low_24 = float(data.iloc[-24:]['Low'].min())
+                low_24 = data.iloc[-24:]['Low'].min()
+                low_24 = self._safe_float(low_24)
                 st.metric("24h Low", f"${low_24:.2f}")
             with col4:
-                rsi_val = float(latest.get('RSI', 50))
+                rsi_val = self._safe_float(latest.get('RSI', 50), 50.0)
                 st.metric("RSI", f"{rsi_val:.1f}")
             
             # Price chart
@@ -342,15 +471,15 @@ class TradingBotGUI:
             st.subheader("Technical Indicators Summary")
             
             latest = data.iloc[-1]
-            latest_close = float(latest['Close'])
-            latest_ema12 = float(latest.get('EMA_12', 0))
-            latest_ema26 = float(latest.get('EMA_26', 0))
-            latest_macd = float(latest.get('MACD', 0))
-            latest_macd_signal = float(latest.get('MACD_Signal', 0))
-            latest_sma50 = float(latest.get('SMA_50', 0))
-            latest_rsi = float(latest.get('RSI', 50))
+            latest_close = self._safe_float(latest['Close'])
+            latest_ema12 = self._safe_float(latest.get('EMA_12', 0), 0.0)
+            latest_ema26 = self._safe_float(latest.get('EMA_26', 0), 0.0)
+            latest_macd = self._safe_float(latest.get('MACD', 0), 0.0)
+            latest_macd_signal = self._safe_float(latest.get('MACD_Signal', 0), 0.0)
+            latest_sma50 = self._safe_float(latest.get('SMA_50', 0), 0.0)
+            latest_rsi = self._safe_float(latest.get('RSI', 50), 50.0)
             
-            recent_20_close = float(data.iloc[-20]['Close']) if len(data) >= 20 else latest_close
+            recent_20_close = self._safe_float(data.iloc[-20]['Close']) if len(data) >= 20 else latest_close
             momentum_pct = ((latest_close - recent_20_close) / recent_20_close * 100) if recent_20_close != 0 else 0
             sma_diff_pct = ((latest_close - latest_sma50) / latest_sma50 * 100) if latest_sma50 != 0 else 0
             
@@ -670,6 +799,231 @@ class TradingBotGUI:
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
+    
+    def _render_ralph_tab(self):
+        """Render Ralph multi-crypto backtest results."""
+        st.header("🎯 Ralph Multi-Crypto Backtest Results")
+        
+        st.markdown("""
+        This tab displays results from Ralph's multi-crypto backtests. Ralph tests your current trading strategy 
+        across multiple cryptocurrencies to find the best performers and identify weaknesses.
+        """)
+        
+        # Load all Ralph multi-backtest results
+        logs_dir = Path(__file__).parent.parent / "logs"
+        ralph_files = sorted(logs_dir.glob("ralph_multi_backtest_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        if not ralph_files:
+            st.info("No multi-crypto backtest results found. Run Ralph with option 4 to generate results.")
+            st.code("python main.py --mode ralph", language="bash")
+            return
+        
+        # Select which result file to view
+        file_options = {f.stem: f for f in ralph_files[:10]}  # Show last 10
+        selected_file_name = st.selectbox(
+            "Select backtest run:",
+            options=list(file_options.keys()),
+            format_func=lambda x: x.replace("ralph_multi_backtest_", "Run: ")
+        )
+        
+        selected_file = file_options[selected_file_name]
+        
+        # Load the results
+        try:
+            with open(selected_file, "r") as f:
+                data = json.load(f)
+            
+            results = data.get("results", {})
+            config = data.get("config", {})
+            timestamp = data.get("timestamp", "Unknown")
+            
+            st.subheader(f"📅 Run Time: {timestamp}")
+            
+            # Display configuration used
+            with st.expander("⚙️ Strategy Configuration Used"):
+                col1, col2, col3 = st.columns(3)
+                strategy = config.get("strategy", {})
+                with col1:
+                    st.metric("Initial Capital", f"${config.get('initial_capital', 0):,.2f}")
+                    st.metric("Min Confidence", f"{strategy.get('min_confidence', 0):.2%}")
+                    st.metric("RSI Low", f"{strategy.get('rsi_low', 0):.1f}")
+                with col2:
+                    st.metric("Lookback Days", config.get('days', 0))
+                    st.metric("RSI High", f"{strategy.get('rsi_high', 0):.1f}")
+                    st.metric("Momentum Window", strategy.get('momentum_window', 0))
+                with col3:
+                    weights = strategy.get('weights', {})
+                    st.metric("Technical Weight", f"{weights.get('technical', 0):.0%}")
+                    st.metric("Sentiment Weight", f"{weights.get('sentiment', 0):.0%}")
+                    st.metric("ML Weight", f"{weights.get('ml', 0):.0%}")
+            
+            if not results:
+                st.warning("No results in this file.")
+                return
+            
+            # Summary metrics
+            st.subheader("📊 Summary")
+            
+            # Convert to DataFrame for easy analysis
+            summary_data = []
+            for symbol, res in results.items():
+                summary_data.append({
+                    'Symbol': symbol,
+                    'Return (%)': res.get('total_return_pct', 0),
+                    'Drawdown (%)': res.get('max_drawdown_pct', 0),
+                    'Win Rate': res.get('win_rate', 0),
+                    'Trades': res.get('num_trades', 0),
+                    'Sharpe': res.get('sharpe_ratio', 0),
+                    'Final Value': res.get('final_value', 0)
+                })
+            
+            df = pd.DataFrame(summary_data)
+            
+            # Overall stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                avg_return = df['Return (%)'].mean()
+                st.metric("Avg Return", f"{avg_return:+.2f}%", 
+                         delta=f"{df['Return (%)'].max():+.2f}% best")
+            with col2:
+                avg_drawdown = df['Drawdown (%)'].mean()
+                st.metric("Avg Drawdown", f"{avg_drawdown:.2f}%")
+            with col3:
+                avg_win_rate = df['Win Rate'].mean()
+                st.metric("Avg Win Rate", f"{avg_win_rate:.1%}")
+            with col4:
+                total_trades = df['Trades'].sum()
+                st.metric("Total Trades", f"{int(total_trades)}")
+            
+            # Results table
+            st.subheader("📋 Detailed Results")
+            
+            # Color code returns
+            def color_return(val):
+                color = 'green' if val > 0 else 'red' if val < 0 else 'gray'
+                return f'color: {color}'
+            
+            # Format and display
+            styled_df = df.style.format({
+                'Return (%)': '{:+.2f}',
+                'Drawdown (%)': '{:.2f}',
+                'Win Rate': '{:.1%}',
+                'Sharpe': '{:.2f}',
+                'Final Value': '${:,.2f}'
+            }).applymap(color_return, subset=['Return (%)'])
+            
+            st.dataframe(styled_df, use_container_width=True, height=400)
+            
+            # Charts
+            st.subheader("📈 Visualizations")
+            
+            tab_chart1, tab_chart2, tab_chart3 = st.tabs(["Returns", "Risk", "Performance"])
+            
+            with tab_chart1:
+                # Returns bar chart
+                fig = px.bar(
+                    df.sort_values('Return (%)', ascending=True),
+                    x='Return (%)',
+                    y='Symbol',
+                    orientation='h',
+                    title='Total Return by Cryptocurrency',
+                    color='Return (%)',
+                    color_continuous_scale=['red', 'yellow', 'green']
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with tab_chart2:
+                # Risk-return scatter
+                fig = px.scatter(
+                    df,
+                    x='Drawdown (%)',
+                    y='Return (%)',
+                    size='Trades',
+                    color='Win Rate',
+                    text='Symbol',
+                    title='Risk vs Return (Size = # Trades, Color = Win Rate)',
+                    color_continuous_scale='RdYlGn'
+                )
+                fig.update_traces(textposition='top center')
+                fig.update_layout(height=500)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with tab_chart3:
+                # Sharpe ratio comparison
+                fig = px.bar(
+                    df.sort_values('Sharpe', ascending=True),
+                    x='Sharpe',
+                    y='Symbol',
+                    orientation='h',
+                    title='Sharpe Ratio Comparison',
+                    color='Sharpe',
+                    color_continuous_scale='viridis'
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Individual crypto drill-down
+            st.subheader("🔍 Individual Crypto Analysis")
+            selected_symbol = st.selectbox("Select cryptocurrency to analyze:", df['Symbol'].tolist())
+            
+            if selected_symbol in results:
+                crypto_result = results[selected_symbol]
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Return", f"{crypto_result['total_return_pct']:+.2f}%")
+                with col2:
+                    st.metric("Max Drawdown", f"{crypto_result['max_drawdown_pct']:.2f}%")
+                with col3:
+                    st.metric("Win Rate", f"{crypto_result['win_rate']:.1%}")
+                with col4:
+                    st.metric("Sharpe Ratio", f"{crypto_result['sharpe_ratio']:.2f}")
+                
+                # Equity curve
+                if crypto_result.get('equity_curve'):
+                    eq_data = crypto_result['equity_curve']
+                    eq_df = pd.DataFrame(eq_data)
+                    
+                    if not eq_df.empty and 'date' in eq_df.columns and 'value' in eq_df.columns:
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=pd.to_datetime(eq_df['date']),
+                            y=eq_df['value'],
+                            name='Portfolio Value',
+                            line=dict(color='blue', width=2),
+                            fill='tozeroy',
+                            fillcolor='rgba(0, 100, 255, 0.1)'
+                        ))
+                        
+                        fig.update_layout(
+                            title=f"{selected_symbol} Equity Curve",
+                            xaxis_title="Date",
+                            yaxis_title="Portfolio Value ($)",
+                            template="plotly_white",
+                            height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                
+                # Trade history
+                if crypto_result.get('trades'):
+                    with st.expander(f"📋 View {len(crypto_result['trades'])} Trades"):
+                        trades_df = pd.DataFrame(crypto_result['trades'])
+                        st.dataframe(trades_df, use_container_width=True)
+            
+            # Download button
+            st.subheader("💾 Export Results")
+            results_json = json.dumps(data, indent=2, default=str)
+            st.download_button(
+                label="📥 Download Full Results (JSON)",
+                data=results_json,
+                file_name=f"{selected_file_name}.json",
+                mime="application/json"
+            )
+            
+        except Exception as e:
+            st.error(f"Error loading results: {e}")
+            st.exception(e)
     
     def _export_report(self):
         """Export performance report."""
